@@ -8,8 +8,7 @@ import (
 	"hash/crc32"
 	"io"
 	"net/http"
-	"os"
-	"strconv"
+	"time"
 
 	"golang.org/x/net/html"
 )
@@ -94,9 +93,9 @@ func getHash(article string) uint32 {
 }
 
 func main() {
-	var url string
 	var urlList string
 	var userAgent string
+	var newsage float64
 
 	// XML structure of RSS
 	type RiaRss struct {
@@ -119,23 +118,43 @@ func main() {
 		} `xml:"channel"`
 	}
 
+	//Структуры для файла с хешами статей
+	type ArticleH struct {
+		URL     string
+		Hash    uint32
+		Created time.Time
+	}
 	// Ключи для командной строки
-	flag.StringVar(&url, "url", "0", "URL of the article")
 	flag.StringVar(&urlList, "xml", "0", "XML with list of the articles")
+	flag.Float64Var(&newsage, "dt", 259200, "Time in seconds to verify changing in news (3 days by default)")
 	flag.StringVar(&userAgent, "uagent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit", "User Agent")
 
 	flag.Parse()
 
-	// Если не указан url и xml выходим: проверять нечего
-	if url == "0" && urlList == "0" {
-		fmt.Println(("URL or XML must be specified"))
+	// Если не указан xml выходим: проверять нечего
+	if urlList == "0" {
+		fmt.Println(("XML must be specified"))
 		return
 	}
 
-	// Проверка для единичного адреса
-	if url != "0" {
-		// Получаем html контент
-		body, err := getHtmlPage(url, userAgent)
+	// Проверка ссылок на статьи из xml файла
+	rss := new(RiaRss)
+	// Получаем текст RSS
+	body, err := getHtmlPage(urlList, userAgent)
+	if err != nil {
+		fmt.Printf("Error getHtmlPage - %v\n", err)
+	}
+	// Разбираем полученный RSS
+	err1 := xml.Unmarshal([]byte(body), rss)
+	if err != nil {
+		fmt.Printf("error: %v", err1)
+		return
+	}
+
+	// Пребираем все ссылки в RSS
+	for _, value := range rss.Channel.Item {
+		fmt.Println("========>", value.Link)
+		body, err := getHtmlPage(value.Link, userAgent)
 		if err != nil {
 			fmt.Printf("Error getHtmlPage - %v\n", err)
 		}
@@ -143,61 +162,9 @@ func main() {
 		article := getArticle(body, "div", "class", "article__title") + "\n"
 		article += getArticle(body, "div", "class", "article__text")
 		articleHash := getHash(article)
-
-	} else if urlList != "0" {
-		// Проверка ссылок на статьи из xml файла
-		rss := new(RiaRss)
-		// Получаем текст RSS
-		body, err := getHtmlPage(urlList, userAgent)
-		if err != nil {
-			fmt.Printf("Error getHtmlPage - %v\n", err)
-		}
-		// Разбираем полученный RSS
-		err1 := xml.Unmarshal([]byte(body), rss)
-		if err != nil {
-			fmt.Printf("error: %v", err1)
-			return
-		}
-
-		var article_err string
-		totalLng := 0
-		// Пребираем все ссылки в RSS
-		for _, value := range rss.Channel.Item {
-			fmt.Println("========>", value.Link)
-			htmlerr += "<p>Link to the article: <a href='" + value.Link + "'>" + value.Link + "</a></p>\n"
-			// Получаем HTML контент
-			body, err := getHtmlPage(value.Link, userAgent)
-			if err != nil {
-				fmt.Printf("Error getHtmlPage - %v\n", err)
-			}
-			// Получаем текст статьи
-			article := getArticle(body, "div", "class", "article__text")
-			articleLen := len(article)
-			fmt.Println("Total length: ", articleLen)
-			htmlerr += "<p>Article length: " + strconv.Itoa(articleLen) + "</p>\n"
-			totalLng += articleLen
-			opt.Article = article
-			sperror, err_sp := speller(opt)
-
-			// Если есть ошибки в тексте, готовим вывод результата
-			if len(sperror) > 0 {
-				article_err = addtags(article, subs_cl, sperror)
-				for _, v := range sperror {
-					fmt.Printf("Incorrect world: %v, pos: %v, len: %v, error: %v\n", v.Word, v.Pos, v.Len, errorCode[v.Code])
-					htmlerr += fmt.Sprintf("<p>Incorrect world: %v, pos: %v, len: %v, error: %v</p>\n", v.Word, v.Pos, v.Len, errorCode[v.Code])
-				}
-				fmt.Println("Article with errors:", article_err)
-				htmlerr += "<p>" + article_err + "</p>\n"
-			}
-			if err_sp != nil {
-				fmt.Printf("Error speller - %v\n", err_sp)
-			}
-			htmlerr += "<br><br>\n"
-		}
-		htmlerr += "<p>Total article length: " + strconv.Itoa(totalLng) + "</p>\n"
-		err = os.WriteFile("error.html", []byte(html_head+htmlerr+"</body>"), 0644)
-		if err != nil {
-			fmt.Printf("Error write HTML file - %v\n", err)
-		}
 	}
+	// err = os.WriteFile("error.html", []byte(html_head+htmlerr+"</body>"), 0644)
+	// if err != nil {
+	// fmt.Printf("Error write HTML file - %v\n", err)
+	// }
 }
