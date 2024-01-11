@@ -218,6 +218,7 @@ func main() {
 			if d.Seconds() < newsage {
 				break
 			}
+			i += 1
 		}
 		if i > 0 {
 			listHash = append(listHash[i:])
