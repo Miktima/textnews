@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"encoding/xml"
 	"flag"
 	"fmt"
 	"hash/crc32"
 	"io"
 	"net/http"
+	"os"
+	"sort"
 	"time"
 
 	"golang.org/x/net/html"
@@ -118,12 +121,18 @@ func main() {
 		} `xml:"channel"`
 	}
 
-	//Структуры для файла с хешами статей
+	//Структура для файла с хешами статей
 	type ArticleH struct {
 		URL     string
 		Hash    uint32
 		Created time.Time
 	}
+
+	//Структура для данных статей
+	type NewsData struct {
+		URL, Article string
+	}
+
 	// Ключи для командной строки
 	flag.StringVar(&urlList, "xml", "0", "XML with list of the articles")
 	flag.Float64Var(&newsage, "dt", 259200, "Time in seconds to verify changing in news (3 days by default)")
@@ -131,40 +140,135 @@ func main() {
 
 	flag.Parse()
 
-	// Если не указан xml выходим: проверять нечего
+	var listHash []ArticleH
+	var listData []NewsData
+
+	// Читаем файл с хешами статей и удаляем файл
+	if _, err := os.Stat("hashes.json"); err == nil {
+		// Open our jsonFile
+		byteValue, err := os.ReadFile("hashes.json")
+		// if we os.ReadFile returns an error then handle it
+		if err != nil {
+			fmt.Println(err)
+		}
+		// defer the closing of our jsonFile so that we can parse it later on
+		// var listHash []ArticleH
+		err = json.Unmarshal(byteValue, &listHash)
+		if err != nil {
+			fmt.Println(err)
+		}
+		// Удаляем файл
+		err = os.Remove("hashes.json")
+		if err != nil {
+			fmt.Println(err)
+		}
+	}
+
+	// Если статья достаточно старая (возраст больше newsage) проверяем текущий hash
+	// И, если текущий хеш отличается от первоначального, то записываем эту статью, как правильную
+
+	var d time.Duration
+	var article string
+	var data NewsData
+
+	for _, value := range listHash {
+		d = time.Since(value.Created)
+		if d.Seconds() > newsage {
+			body, err := getHtmlPage(value.URL, userAgent)
+			if err != nil {
+				fmt.Printf("Error getHtmlPage - %v\n", err)
+			}
+			// Получаем заголовок и текст статьи
+			article = getArticle(body, "div", "class", "article__title") + "\n"
+			article += getArticle(body, "div", "class", "article__text")
+			// Сравниваем hash статьи
+			fmt.Println("DATA Checked========>", value.URL)
+			if value.Hash != getHash(article) {
+				data.URL = value.URL
+				data.Article = article
+				listData = append(listData, data)
+				fmt.Println("DATA Stored========>", value.URL)
+			}
+		}
+	}
+
+	//записываем данные в файл, если они есть
+	if len(listData) > 0 {
+		f, err := os.OpenFile("datanews.json", os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
+		if err != nil {
+			fmt.Printf("Error opening to datanews.json file - %v\n", err)
+		}
+		defer f.Close()
+
+		arData, _ := json.MarshalIndent(listData, "", " ")
+		_, err = f.Write(arData)
+		if err != nil {
+			fmt.Printf("Error write Article data - %v\n", err)
+		}
+	}
+
+	// "Старые" статьи удаляем из списка хешей
+	// Сортируем так, что более старые сначала
+	if len(listHash) > 0 {
+		sort.Slice(listHash, func(i, j int) bool { return listHash[i].Created.Unix() < listHash[j].Created.Unix() })
+		i := 0
+		for _, value := range listHash {
+			// Прерываем цикл, когда старые закончились
+			d = time.Since(value.Created)
+			if d.Seconds() < newsage {
+				break
+			}
+		}
+		if i > 0 {
+			listHash = append(listHash[i:])
+		}
+	}
+
+	// Если не указан xml выходим
 	if urlList == "0" {
-		fmt.Println(("XML must be specified"))
-		return
-	}
+		fmt.Println(("XML не указан!!!"))
+	} else {
 
-	// Проверка ссылок на статьи из xml файла
-	rss := new(RiaRss)
-	// Получаем текст RSS
-	body, err := getHtmlPage(urlList, userAgent)
-	if err != nil {
-		fmt.Printf("Error getHtmlPage - %v\n", err)
-	}
-	// Разбираем полученный RSS
-	err1 := xml.Unmarshal([]byte(body), rss)
-	if err != nil {
-		fmt.Printf("error: %v", err1)
-		return
-	}
-
-	// Пребираем все ссылки в RSS
-	for _, value := range rss.Channel.Item {
-		fmt.Println("========>", value.Link)
-		body, err := getHtmlPage(value.Link, userAgent)
+		// Проверка ссылок на статьи из xml файла
+		rss := new(RiaRss)
+		// Получаем текст RSS
+		body, err := getHtmlPage(urlList, userAgent)
 		if err != nil {
 			fmt.Printf("Error getHtmlPage - %v\n", err)
 		}
-		// Получаем заголовок и текст статьи
-		article := getArticle(body, "div", "class", "article__title") + "\n"
-		article += getArticle(body, "div", "class", "article__text")
-		articleHash := getHash(article)
+		// Разбираем полученный RSS
+		err1 := xml.Unmarshal([]byte(body), rss)
+		if err != nil {
+			fmt.Printf("error: %v", err1)
+			return
+		}
+
+		var articleHash ArticleH
+		// Перебираем все ссылки в RSS
+		for _, value := range rss.Channel.Item {
+			fmt.Println("HASH========>", value.Link)
+			body, err := getHtmlPage(value.Link, userAgent)
+			if err != nil {
+				fmt.Printf("Error getHtmlPage - %v\n", err)
+			}
+			// Получаем заголовок и текст статьи
+			article = getArticle(body, "div", "class", "article__title") + "\n"
+			article += getArticle(body, "div", "class", "article__text")
+			// Получаем hash статьи
+			articleHash.URL = value.Link
+			articleHash.Hash = getHash(article)
+			articleHash.Created, _ = time.Parse(time.RFC1123Z, value.Pubdate)
+			listHash = append(listHash, articleHash)
+			fmt.Printf("Hash: %d, Time: %v\n\n", articleHash.Hash, value.Pubdate)
+		}
 	}
-	// err = os.WriteFile("error.html", []byte(html_head+htmlerr+"</body>"), 0644)
-	// if err != nil {
-	// fmt.Printf("Error write HTML file - %v\n", err)
-	// }
+
+	file, err := json.MarshalIndent(listHash, "", " ")
+	if err != nil {
+		fmt.Printf("Error - %v\n", err)
+	}
+	err = os.WriteFile("hashes.json", file, 0644)
+	if err != nil {
+		fmt.Printf("Error write Article hashes - %v\n", err)
+	}
 }
