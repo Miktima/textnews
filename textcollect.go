@@ -11,10 +11,44 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"golang.org/x/net/html"
 )
+
+// XML structure of RSS
+type RiaRss struct {
+	XMLName xml.Name `xml:"rss"`
+	Channel struct {
+		Title     string `xml:"title"`
+		Link      string `xml:"link"`
+		Language  string `xml:"language"`
+		Copyright string `xml:"copyright"`
+		Item      []struct {
+			Title     string `xml:"title"`
+			Link      string `xml:"link"`
+			Guid      string `xml:"guid"`
+			Priority  string `xml:"rian:priority"`
+			Pubdate   string `xml:"pubDate"`
+			Type      string `xml:"rian:type"`
+			Category  string `xml:"category"`
+			Enclosure string `xml:"enclosure"`
+		} `xml:"item"`
+	} `xml:"channel"`
+}
+
+//Структура для файла с хешами статей
+type ArticleH struct {
+	URL     string
+	Hash    uint32
+	Created time.Time
+}
+
+//Структура для данных статей
+type NewsData struct {
+	URL, Article string
+}
 
 func getHtmlPage(url, userAgent string) ([]byte, error) {
 	// функция получения ресурсов по указанному адресу url с использованием User-Agent
@@ -95,43 +129,19 @@ func getHash(article string) uint32 {
 	return hArticle.Sum32()
 }
 
+func inSlice(tSlice []ArticleH, url string) bool {
+	for _, v := range tSlice {
+		if v.URL == url {
+			return true
+		}
+	}
+	return false
+}
+
 func main() {
 	var urlList string
 	var userAgent string
 	var newsage float64
-
-	// XML structure of RSS
-	type RiaRss struct {
-		XMLName xml.Name `xml:"rss"`
-		Channel struct {
-			Title     string `xml:"title"`
-			Link      string `xml:"link"`
-			Language  string `xml:"language"`
-			Copyright string `xml:"copyright"`
-			Item      []struct {
-				Title     string `xml:"title"`
-				Link      string `xml:"link"`
-				Guid      string `xml:"guid"`
-				Priority  string `xml:"rian:priority"`
-				Pubdate   string `xml:"pubDate"`
-				Type      string `xml:"rian:type"`
-				Category  string `xml:"category"`
-				Enclosure string `xml:"enclosure"`
-			} `xml:"item"`
-		} `xml:"channel"`
-	}
-
-	//Структура для файла с хешами статей
-	type ArticleH struct {
-		URL     string
-		Hash    uint32
-		Created time.Time
-	}
-
-	//Структура для данных статей
-	type NewsData struct {
-		URL, Article string
-	}
 
 	// Ключи для командной строки
 	flag.StringVar(&urlList, "xml", "0", "XML with list of the articles")
@@ -143,10 +153,14 @@ func main() {
 	var listHash []ArticleH
 	var listData []NewsData
 
+	path, _ := os.Executable()
+	path = path[:strings.LastIndex(path, "/")+1]
+	fmt.Println("Path: ", path)
+
 	// Читаем файл с хешами статей и удаляем файл
-	if _, err := os.Stat("hashes.json"); err == nil {
+	if _, err := os.Stat(path + "/hashes.json"); err == nil {
 		// Open our jsonFile
-		byteValue, err := os.ReadFile("hashes.json")
+		byteValue, err := os.ReadFile(path + "/hashes.json")
 		// if we os.ReadFile returns an error then handle it
 		if err != nil {
 			fmt.Println(err)
@@ -158,7 +172,7 @@ func main() {
 			fmt.Println(err)
 		}
 		// Удаляем файл
-		err = os.Remove("hashes.json")
+		err = os.Remove(path + "/hashes.json")
 		if err != nil {
 			fmt.Println(err)
 		}
@@ -194,7 +208,7 @@ func main() {
 
 	//записываем данные в файл, если они есть
 	if len(listData) > 0 {
-		f, err := os.OpenFile("datanews.json", os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
+		f, err := os.OpenFile(path+"/datanews.json", os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
 		if err != nil {
 			fmt.Printf("Error opening to datanews.json file - %v\n", err)
 		}
@@ -207,29 +221,10 @@ func main() {
 		}
 	}
 
-	// "Старые" статьи удаляем из списка хешей
-	// Сортируем так, что более старые сначала
-	if len(listHash) > 0 {
-		sort.Slice(listHash, func(i, j int) bool { return listHash[i].Created.Unix() < listHash[j].Created.Unix() })
-		i := 0
-		for _, value := range listHash {
-			// Прерываем цикл, когда старые закончились
-			d = time.Since(value.Created)
-			if d.Seconds() < newsage {
-				break
-			}
-			i += 1
-		}
-		if i > 0 {
-			listHash = append(listHash[i:])
-		}
-	}
-
 	// Если не указан xml выходим
 	if urlList == "0" {
 		fmt.Println(("XML не указан!!!"))
 	} else {
-
 		// Проверка ссылок на статьи из xml файла
 		rss := new(RiaRss)
 		// Получаем текст RSS
@@ -247,20 +242,40 @@ func main() {
 		var articleHash ArticleH
 		// Перебираем все ссылки в RSS
 		for _, value := range rss.Channel.Item {
-			fmt.Println("HASH========>", value.Link)
-			body, err := getHtmlPage(value.Link, userAgent)
-			if err != nil {
-				fmt.Printf("Error getHtmlPage - %v\n", err)
+			if !inSlice(listHash, value.Link) {
+				fmt.Println("HASH========>", value.Link)
+				body, err := getHtmlPage(value.Link, userAgent)
+				if err != nil {
+					fmt.Printf("Error getHtmlPage - %v\n", err)
+				}
+				// Получаем заголовок и текст статьи
+				article = getArticle(body, "div", "class", "article__title") + "\n"
+				article += getArticle(body, "div", "class", "article__text")
+				// Получаем hash статьи
+				articleHash.URL = value.Link
+				articleHash.Hash = getHash(article)
+				articleHash.Created, _ = time.Parse(time.RFC1123Z, value.Pubdate)
+				listHash = append(listHash, articleHash)
+				fmt.Printf("Hash: %d, Time: %v\n\n", articleHash.Hash, value.Pubdate)
 			}
-			// Получаем заголовок и текст статьи
-			article = getArticle(body, "div", "class", "article__title") + "\n"
-			article += getArticle(body, "div", "class", "article__text")
-			// Получаем hash статьи
-			articleHash.URL = value.Link
-			articleHash.Hash = getHash(article)
-			articleHash.Created, _ = time.Parse(time.RFC1123Z, value.Pubdate)
-			listHash = append(listHash, articleHash)
-			fmt.Printf("Hash: %d, Time: %v\n\n", articleHash.Hash, value.Pubdate)
+		}
+	}
+
+	// "Старые" статьи удаляем из списка хешей
+	// Сортируем так, что более старые сначала
+	if len(listHash) > 0 {
+		sort.Slice(listHash, func(i, j int) bool { return listHash[i].Created.Unix() < listHash[j].Created.Unix() })
+		i := 0
+		for _, value := range listHash {
+			// Прерываем цикл, когда старые закончились
+			d = time.Since(value.Created)
+			if d.Seconds() < newsage {
+				break
+			}
+			i += 1
+		}
+		if i > 0 {
+			listHash = listHash[i:]
 		}
 	}
 
@@ -268,7 +283,7 @@ func main() {
 	if err != nil {
 		fmt.Printf("Error - %v\n", err)
 	}
-	err = os.WriteFile("hashes.json", file, 0644)
+	err = os.WriteFile(path+"/hashes.json", file, 0644)
 	if err != nil {
 		fmt.Printf("Error write Article hashes - %v\n", err)
 	}
